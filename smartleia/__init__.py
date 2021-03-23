@@ -24,7 +24,7 @@ __all__ = [
     "LEIA",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 name = "smartleia"
 
@@ -69,6 +69,31 @@ class ByteStruct(LEIAStructure):
     _fields_ = [("value", ctypes.c_uint8)]
 
 
+class Timers(LEIAStructure):
+    _pack_ = 1
+    _fields_ = [
+        ("delta_t", ctypes.c_uint32),
+        ("delta_t_answer", ctypes.c_uint32),
+    ]
+
+    def __init__(self, delta_t = 0, delta_t_answer = 0):
+        """
+        Create a Timers structure.
+
+        Parameters:
+            delta_t (int) : total time for the APDU.
+            delta_t_answer (int) : answer time for the APDU.
+        """
+        LEIAStructure.__init__(self, delta_t = 0, delta_t_answer = 0)
+        self.delta_t = self.delta_t_answer = 0
+
+    def __str__(self) -> str:
+        return f"""Timers(
+        delta_t={self.delta_t:d} microseconds,
+        delta_t_answer={self.delta_t_answer:d} microseconds,
+        )"""
+ 
+##### Triggers handling ######
 class TriggerPoints(IntFlag):
     """
     Class utility to reference the trigger points available.
@@ -112,44 +137,28 @@ class TriggerPoints(IntFlag):
     TRIG_IRQ_GETC = 1 << 9
 
 
-class Timers(LEIAStructure):
-    _pack_ = 1
-    _fields_ = [
-        ("delta_t", ctypes.c_uint32),
-        ("delta_t_answer", ctypes.c_uint32),
-    ]
-
-    def __init__(self, delta_t = 0, delta_t_answer = 0):
-        """
-        Create a Timers structure.
-
-        Parameters:
-            delta_t (int) : total time for the APDU.
-            delta_t_answer (int) : answer time for the APDU.
-        """
-        LEIAStructure.__init__(self, delta_t = 0, delta_t_answer = 0)
-        self.delta_t = self.delta_t_answer = 0
-
-    def __str__(self) -> str:
-        return f"""Timers(
-        delta_t={self.delta_t:d} microseconds,
-        delta_t_answer={self.delta_t_answer:d} microseconds,
-        )"""
- 
-
 class Triggers(Enum):
-
-    #: Triggers after the first byte of an APDU has been sent.
-    TRIG_AFTER_1ST_BYTE_SEND_APDU = [
+    # NOTE: you can improve your trigger strategies here by adding new ones
+    # or existing ones!
+    #: Triggers at the beginning and end of ATR: first trig just before
+    # reading ATR, second trig after we have got the ATR
+    MULTI_TRIG_ATR = [
+        TriggerPoints.TRIG_GET_ATR_PRE,
+        TriggerPoints.TRIG_GET_ATR_POST,
+    ]
+    # Triggers after the first byte of an APDU has been sent: first trig
+    # just after we have sent our APDU command, second trig when receiving
+    # the first response byte from the card.
+    MULTI_TRIG_AFTER_1ST_BYTE_SEND_APDU = [
         TriggerPoints.TRIG_PRE_SEND_APDU,
         TriggerPoints.TRIG_IRQ_PUTC,
     ]
-
+    
 
 class TriggerStrategy(LEIAStructure):
     """
     Attributes:
-        delay (int): the delay between event detection and effective trig on GPIO.
+        delay (int): the delay between event detection and effective trig on GPIO in milliseconds.
         point_list (list[int]): the list of events to match.
     """
 
@@ -157,15 +166,19 @@ class TriggerStrategy(LEIAStructure):
     _fields_ = [
         ("size", ctypes.c_uint8),
         ("delay", ctypes.c_uint32),
-        ("delay_cnt", ctypes.c_uint32),
+        ("single", ctypes.c_uint8),
         ("_list", ctypes.c_uint32 * TRIGGER_DEPTH),
+        ("_list_trigged", ctypes.c_uint32 * TRIGGER_DEPTH),
+        ("_cnt_trigged", ctypes.c_uint32 * TRIGGER_DEPTH),
+        ("_event_time", ctypes.c_uint32 * TRIGGER_DEPTH),
+        ("_apply_delay", ctypes.c_uint32 * TRIGGER_DEPTH),
     ]
 
-    def __init__(self, delay=0, point_list=None):
+    def __init__(self, delay=0, single=0, point_list=None):
         if point_list is None:
             point_list = []
 
-        LEIAStructure.__init__(self, size=0, delay=delay, delay_cnt=0)
+        LEIAStructure.__init__(self, size=0, delay=delay, single=single)
         self.point_list = point_list
 
     def _translate_point_list(self, point_list):
@@ -175,7 +188,7 @@ class TriggerStrategy(LEIAStructure):
         return list(map(lambda point: TriggerPoints(point).value, point_list))
 
     def __str__(self) -> str:
-        return f"TriggerStrategy(delay={self.delay}, point_list={self.point_list})"
+        return f"TriggerStrategy(single={self.single}, delay={self.delay}, point_list={self.point_list}, point_list_trigged={self.point_list_trigged}, cnt_list_trigged={self.cnt_list_trigged}, event_time={self.event_time_list})"
 
     @property
     def point_list(self):
@@ -199,10 +212,33 @@ class TriggerStrategy(LEIAStructure):
             self._list[i] = value[i]
         self.size = len(value)
 
+    @property
+    def point_list_trigged(self):
+        _point_list_trigged = list(self._list_trigged)[0 : self.size]
+        try:
+            r = Triggers(_point_list_trigged)
+        except Exception:
+            r = list(map(lambda i: TriggerPoints(i), _point_list_trigged))
+
+        return r
+
+    @property
+    def cnt_list_trigged(self):
+        _cnt_list_trigged = list(self._cnt_trigged)[0 : self.size]
+
+        return _cnt_list_trigged
+
+    @property
+    def event_time_list(self):
+        _event_time_list = list(self._event_time)[0 : self.size]
+
+        return _event_time_list
+
+
 
 class SetTriggerStrategy(LEIAStructure):
     _pack_ = 1
-    _fields = [("index", ctypes.c_uint8), ("strategy", TriggerStrategy)]
+    _fields_ = [("index", ctypes.c_uint8), ("strategy", TriggerStrategy)]
 
     def __str__(self) -> str:
         return f"SetTriggerStrategy(index={self.index}, strategy={self.strategy})"
@@ -574,6 +610,32 @@ class T(IntEnum):
     #: The protocol is T=1
     T1 = 1
 
+class Mode(IntEnum):
+    """
+    ISO7816 mode selection.
+    """
+   
+    # USART mode
+    USART = 0
+
+    # Bitbang mode
+    BITBANG = 1
+
+class LEIAMode(LEIAStructure):
+    _pack_ = 1
+    _fields_ = [
+        ("mode", ctypes.c_uint8),
+    ]
+
+    def __init__(
+        self,
+        mode,
+    ):
+        LEIAStructure.__init__(
+            self,
+            mode=mode,
+        )
+
 
 class ConfigureSmartcardCommand(LEIAStructure):
     _pack_ = 1
@@ -757,6 +819,34 @@ class LEIA:
             self._testWaitingFlag()
             self.ser.timeout = 10
 
+    # Set the mode to either USART or BITBANG
+    def set_mode(self, mode: Mode):
+        if mode == Mode.USART:
+            self._send_command(b"e", LEIAMode(Mode.USART))
+        elif mode == Mode.BITBANG:
+            self._send_command(b"e", LEIAMode(Mode.BITBANG))
+        else:
+            raise Exception(
+                "Invalid mode for 'set_mode' (e) command."
+            )
+        
+    # Get the current mode
+    def get_mode(self):
+        self._send_command(b"g")
+        r_size = self._read_response_size()
+        if r_size != 1:
+            raise Exception(
+                "Invalid response size for 'get_mode' (g) command."
+            )
+        r = self.ser.read(1)
+        if r == b"\x00":
+            mode = Mode.USART
+        elif r == b"\x01":
+            mode = Mode.BITBANG
+        else:
+            mode = None
+        return mode
+
     def configure_smartcard(
         self,
         protocol_to_use: Optional[T] = None,
@@ -812,7 +902,7 @@ class LEIA:
 
             # We always try to negotiate a T=1 communication if not specifically asked otherwise
             # Fallback to auto if this is not possible!
-            if protocol_to_use == T.AUTO:
+            if (protocol_to_use == T.AUTO) and (negotiate_pts == True):
                 try:
                     struct = ConfigureSmartcardCommand(
                         T(T.T1).value + 1,
@@ -853,6 +943,9 @@ class LEIA:
         """
 
         with self.lock:
+            if SID >= STRATEGY_MAX:
+                raise Exception("get_trigger_strategy: asked SID=%d exceeds STRATEGY_MAX=%d" % (SID, STRATEGY_MAX))
+           
             self._send_command(b"o", ByteStruct(SID))
 
             r_size = self._read_response_size()
@@ -861,7 +954,7 @@ class LEIA:
         return r
 
     def set_trigger_strategy(
-        self, SID: int, point_list: Union[int, List[int]], delay: int = 0
+        self, SID: int, point_list: Union[int, List[int]], delay: int = 0, single: int = 0
     ):
         """
         Set and activate a trigger strategy.
@@ -869,27 +962,24 @@ class LEIA:
         Parameters:
             SID: the strategy bank ID to use.
             point_list: the sequence to match for the trigger.
-            delay: the delay between the moment of the detection and the moment where the trigger is actually set high.
+            delay: the delay (in milliseconds) between the moment of the detection and the moment where the trigger is actually set high.
         """
 
         with self.lock:
+            if SID >= STRATEGY_MAX:
+                raise Exception("get_trigger_strategy: asked SID=%d exceeds STRATEGY_MAX=%d" % (SID, STRATEGY_MAX))
+
             if isinstance(point_list, int):
                 size = 1
                 point_list = [point_list]
 
             size = len(point_list)
 
-            sts = SetTriggerStrategy()
-            sts.index = SID
-            sts.strategy.size = size
-            for i in range(size):
-                sts.strategy.list[i] = point_list[i]
-
-            sts.strategy.delay = delay
+            sts = SetTriggerStrategy(SID, TriggerStrategy(delay = delay, single = single, point_list = point_list))
 
             self._send_command(b"O", sts)
 
-    def get_timers(self) -> ATR:
+    def get_timers(self) -> Timers:
         """
         Return the `timers` of the last command.
 
@@ -941,6 +1031,7 @@ class LEIA:
 
         return True if r == b"\x01" else False
 
+    # DFU mode
     def dfu(self) -> None:
         """
         Reboot LEIA in DFU mode.
@@ -948,6 +1039,27 @@ class LEIA:
         with self.lock:
             try:
                 self._send_command(b"u")
+            except serial.SerialException:
+                pass
+
+    # AVR flasher mode
+    def flasher(self) -> None:
+        """
+        Reboot LEIA in funcard flasher mode.
+        """
+        with self.lock:
+            try:
+                self._send_command(b"f")
+            except serial.SerialException:
+                pass
+ 
+    def smartreader(self) -> None:
+        """
+        Reboot LEIA in funcard smartreader mode.
+        """
+        with self.lock:
+            try:
+                self._send_command(b"s")
             except serial.SerialException:
                 pass
 
